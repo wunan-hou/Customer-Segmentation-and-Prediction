@@ -1,0 +1,339 @@
+setwd('~/Desktop')
+raw_data = read.csv('e_commerce.csv')
+raw_data$InvoiceDate = as.character(raw_data$InvoiceDate)
+raw_data$StockCode = as.character(raw_data$StockCode)
+raw_data$Description = as.character(raw_data$Description)
+raw_data$InvoiceNo = as.character(raw_data$InvoiceNo)
+summary(raw_data)
+update_data <- raw_data[-which(is.na(raw_data$CustomerID)), ]
+summary(update_data)
+
+# delete duplicate rows
+library('dplyr')
+update_data = update_data %>% distinct()
+
+# delete canceled order 
+canceled_data = update_data[(update_data$Quantity <0),]
+ordered_data = update_data[which(update_data$Quantity>0 & update_data$Description!='Discount'),]
+for (row in 1:nrow(canceled_data)){
+  if (canceled_data$CustomerID[row] %in% update_data$CustomerID  & 
+      canceled_data$Description[row] %in% update_data$Description &
+      canceled_data$UnitPrice[row] %in% update_data$UnitPrice){
+    print(canceled_data[row,])
+    break
+  }
+}
+update_data[which(update_data$Description == 'Discount'),]  # useless data
+
+# normal stockcode after delete descripton as discount
+for (row in 1:nrow(canceled_data)){
+  if (canceled_data$Description[row] != 'Discount'&
+      canceled_data$CustomerID[row] %in% update_data$CustomerID  & 
+      canceled_data$Description[row] %in% update_data$Description &
+      canceled_data$UnitPrice[row] %in% update_data$UnitPrice){
+    count = canceled_data[row,]
+    print(row)
+    break
+  }
+}
+
+# record canceled data
+ordered_data$canceled = 0 
+for (row in 1:nrow(ordered_data)){
+  count = canceled_data[(canceled_data$StockCode == ordered_data$StockCode[row])
+                        & (canceled_data$CustomerID == ordered_data$CustomerID[row])
+                        & (canceled_data$Description==ordered_data$Description[row]),]
+  if(nrow(count)  ==1){
+    ordered_data$canceled[row]=canceled_data[rownames(count),'Quantity']*(-1)
+  }
+  else if(nrow(count) > 1){
+    if (-sum(count$Quantity) >ordered_data$Quantity[row] ){
+      ordered_data$canceled[row] =ordered_data$Quantity[row]
+    }
+    else{
+      ordered_data$canceled[row] = -sum(count$Quantity)
+    }
+  }
+  
+}
+
+# count word frequnecy of product description
+ordered_data$total_price = ordered_data$UnitPrice * (ordered_data$Quantity-ordered_data$canceled)
+ordered_data$total_price = ifelse(ordered_data$total_price > 0,ordered_data$total_price,0)
+word_string = unique(ordered_data$Description)
+word_string = tolower(word_list)
+word_string = gsub("(?!\\-)[[:punct:]]"," ",word_string, perl=TRUE)
+word_list = strsplit(word_string, " ")
+word_list <- unlist(word_list)
+freq<-table(word_list)
+freq_list<-sort(freq, decreasing=TRUE)
+top_freq= as.data.frame(freq_list)
+top_freq$word_list= as.character(top_freq$word_list)
+
+# plot word frequency1
+library(ggplot2)
+ggplot(top_freq[1:25,],aes(x = reorder(word_list,Freq),y = Freq)) +geom_col(color='lightblue') +labs(title="Most frequent words",x = NULL,y = "Frequency") + coord_flip()
+
+# plot word frequency2
+library(tm)        
+update_list = c()
+stop_words = c(stopwords('english'))
+number = as.character(seq(1:100))
+remove_words = c('-','white','set','black','red','pink', 'blue', 'tag', 'green', 'orange','','&',number)
+extract_word = c()
+for (row in 1:nrow(top_freq)){
+  if (tolower(top_freq$word_list[row]) %in% stop_words || tolower(top_freq$word_list[row]) %in% remove_words){
+    next
+  }
+  else if (nchar(top_freq$word_list[row]) < 3) {
+    next
+  }
+  else if (top_freq$Freq[row] < 13){
+    next
+  }
+  else{
+    extract_word = c(extract_word,row)
+  }
+}
+update_freq = top_freq[extract_word,]
+ggplot(update_freq[1:25,],aes(x = reorder(word_list,Freq),y = Freq)) +geom_col(color='lightblue') +labs(title="Update Most frequent words",x = NULL,y = "Frequency") + coord_flip()
+
+# one-hot-encoding
+word_matrix = matrix(data = 0,ncol = length(update_freq$word_list), nrow = length(unique(ordered_data$Description)))
+rownames(word_matrix) = unique(ordered_data$Description)
+colnames(word_matrix) = unique(update_freq$word_list)
+for (row in rownames(word_matrix)){
+  for(col in colnames(word_matrix)){
+    row_name = gsub("(?!\\-)[[:punct:]]"," ",row, perl=TRUE)
+    row_name = strsplit(tolower(row_name)," ")
+    row_name = unlist(row_name)
+    if (tolower(col) %in% row_name){
+      word_matrix[row,col] = 1
+    }
+  }
+}
+
+
+#function to compute average silhouette for k clusters
+library(tidyverse)
+library(cluster)   
+library(factoextra) 
+avg_sil <- function(k) {
+km.res=kmeans(word_matrix,k,nstart=25)
+ss <- silhouette(km.res$cluster, dist(word_matrix))
+mean(ss[, 3])
+}
+# Compute and plot wss from k = 2 to k = 15
+k.values <- 2:15
+avg_sil_values <- map_dbl(k.values, avg_sil)
+plot(k.values, avg_sil_values,
+     type = "b", pch = 19, frame = FALSE, 
+     xlab = "Number of clusters K",
+     ylab = "Average Silhouettes")
+
+optimal_k = k.values[which.max(avg_sil_values)]
+optimal_k 
+
+
+# optimal k = 12
+set.seed(4)
+km.out=kmeans(word_matrix,12,nstart=25) #clusters
+km.out$size
+
+# perform PCA on the word martrix
+pr.out=prcomp(word_matrix)
+# plot PVE curve
+pve=100*pr.out$sdev^2/sum(pr.out$sdev^2)
+plot(pve, type="o", ylab="PVE", xlab="Principal Component",col =" blue ")
+plot(cumsum(pve), type="o", ylab="Cumulative PVE", xlab="Principal Component ", col =" brown3 ")
+
+# plot pca clusters
+pca_50 = data.frame(pr.out$x[, 1:50])
+pca_50$cluster = km.out$cluster
+pca_50$cluster = as.factor(pca_50$cluster)
+library(ggplot2)
+p1 = ggplot(pca_50, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = factor(cluster)))
+p2 = ggplot(pca_50, aes(x = PC1, y = PC3)) +
+  geom_point(aes(color = factor(cluster)))
+p3 = ggplot(pca_50, aes(x = PC1, y = PC4)) +
+  geom_point(aes(color = factor(cluster)))
+p4 = ggplot(pca_50, aes(x = PC2, y = PC3)) +
+  geom_point(aes(color = factor(cluster)))
+p5 =ggplot(pca_50, aes(x = PC2, y = PC4)) +
+  geom_point(aes(color = factor(cluster)))
+p6 = ggplot(pca_50, aes(x = PC3, y = PC4)) +
+  geom_point(aes(color = factor(cluster)))
+library(gridExtra)
+grid.arrange(p1, p2, p3,p4,p5,p6,nrow = 2,ncol = 3)
+
+# add product category to the dataframe
+ordered_data$product_catrgory = NA
+for (row in 1:nrow(ordered_data)){
+  for (row_name in rownames(pca_50)){
+    if (ordered_data$Description[row] == row_name){
+      ordered_data$product_catrgory[row] = pca_50[row_name,'cluster']
+    }
+  }
+}
+
+#categ_N variables (with  N∈[1:4] ) that contains the amount spent in each product category
+ordered_data$cate_1 = 0
+ordered_data$cate_2 = 0
+ordered_data$cate_3 = 0
+ordered_data$cate_4 = 0
+ordered_data$cate_5 = 0
+ordered_data$cate_6 = 0
+ordered_data$cate_7 = 0
+ordered_data$cate_8 = 0
+ordered_data$cate_9 = 0
+ordered_data$cate_10 =0
+ordered_data$cate_11= 0
+ordered_data$cate_12= 0
+for (row in 1:nrow(ordered_data)){
+  if (ordered_data$product_catrgory[row] == 1){
+    ordered_data$cate_1[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 2){
+    ordered_data$cate_2[row] = ordered_data$total_price[row]
+  }
+ else if (ordered_data$product_catrgory[row] == 3){
+   ordered_data$cate_3[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 4){
+  ordered_data$cate_4[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 5){
+    ordered_data$cate_5[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 6){
+    ordered_data$cate_6[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 7){
+    ordered_data$cate_7[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 8){
+    ordered_data$cate_8[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 9){
+    ordered_data$cate_9[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 10){
+    ordered_data$cate_10[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 11){
+    ordered_data$cate_11[row] = ordered_data$total_price[row]
+  }
+  else if (ordered_data$product_catrgory[row] == 12){
+    ordered_data$cate_12[row] = ordered_data$total_price[row]
+  }
+  
+}
+
+# create data frame containes variables relate to purchasing pattern for each customer
+data_per_customer2 = ordered_data %>% group_by(CustomerID)%>% 
+  summarize(count= n(), mean = mean(total_price),min = min(total_price), 
+            max = max(total_price), sum = sum(total_price),
+            cate_1 = sum(cate_1),cate_2 = sum(cate_2), cate_3 = sum(cate_3),
+            cate_4 = sum(cate_4), cate_5 = sum(cate_5),cate_6 = sum(cate_6), cate_7 = sum(cate_7),
+            cate_8 = sum(cate_8),cate_9 = sum(cate_9),cate_10 = sum(cate_10), cate_11 = sum(cate_11),
+            cate_12 = sum(cate_12))
+customer_cluster2 = select(data_per_customer2, count:cate_12)
+#scale data
+scaled_data2 = as.data.frame(scale(customer_cluster2))
+
+# correlation matrix of scaled data
+library(ggplot2)
+cormat <- round(cor(scaled_data2),2)
+library(reshape2)
+melted_cormat <- melt(cormat)
+head(melted_cormat)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+
+# perform PCA on the scaled data
+pr.scale2=prcomp(scaled_data2)
+# plot PVE curve
+pve.scale2=100*pr.scale2$sdev^2/sum(pr.scale2$sdev^2)
+plot(pve.scale2, type="o", ylab="PVE", xlab="Principal Component",col =" blue ")
+plot(cumsum(pve.scale2), type="o", ylab="Cumulative PVE", xlab="Principal Component ", col =" brown3 ")
+
+set.seed(123)
+# function to compute total within-cluster sum of square 
+wss <- function(k) {
+  kmeans(pr.scale2$x[,1:6], k, nstart = 25)$tot.withinss
+}
+# Compute and plot wss for k = 2 to k = 20
+k.values <- 2:20
+# extract wss for 2-20 clusters
+wss_values <- map_dbl(k.values, wss)
+plot(k.values, wss_values,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+
+
+# optimal k = 10
+set.seed(5)
+km.out=kmeans(pr.scale2$x[,1:6],10,nstart=25) 
+km.out$size
+
+# visualize data on first 4 principal components
+pca_6 = as.data.frame(pr.scale2$x[,1:6])
+pca_6$cluster = km.out$cluster
+pca_6$cluster = as.factor(pca_6$cluster)
+library(ggplot2)
+p11 = ggplot(pca_6, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = factor(cluster)))
+p21 = ggplot(pca_6, aes(x = PC1, y = PC3)) +
+  geom_point(aes(color = factor(cluster)))
+p31 = ggplot(pca_6, aes(x = PC1, y = PC4)) +
+  geom_point(aes(color = factor(cluster)))
+p41 = ggplot(pca_6, aes(x = PC2, y = PC3)) +
+  geom_point(aes(color = factor(cluster)))
+p51 =ggplot(pca_6, aes(x = PC2, y = PC4)) +
+  geom_point(aes(color = factor(cluster)))
+p61 = ggplot(pca_6, aes(x = PC3, y = PC4)) +
+  geom_point(aes(color = factor(cluster)))
+library(gridExtra)
+grid.arrange(p11, p21, p31,p41,p51,p61,nrow = 2,ncol = 3)
+
+# add customer cluster to the data
+processed_data = customer_cluster2 %>%
+  mutate(cluster = km.out$cluster) 
+# visualize the result in a scatter plot
+fviz_cluster(list(data = processed_data, cluster = processed_data$cluster))
+
+# split training set and test set
+complete_data = select(processed_data, mean,cate_1:cate_12,cluster)
+complete_data$cluster = as.factor(complete_data$cluster)
+set.seed(5)
+train= sample( 1:nrow(complete_data), floor(0.75*nrow(complete_data)))
+train_set =complete_data[train,]
+test_set= complete_data[-train,]
+
+# random forest
+library(rpart)
+library(caret)
+library(e1071)
+numFolds <- trainControl(method = "cv", number = 10)
+cpGrid <- expand.grid(.cp = seq(0.01, 0.5, 0.01))
+rf.train = train(cluster ~ ., data = train_set, method = "rpart", trControl = numFolds, tuneGrid = cpGrid)
+rf_cv = rpart(cluster ~ ., data = train_set, method = "class", cp = 0.05 )
+predictionCV <- predict(rf_cv, newdata = test_set, type = "class")
+rf.confusion = table(true = test_set$cluster, pred = predictionCV)
+rf.accuracy = (850+115) / sum(rf.confusion)
+rf.accuracy
+
+# non-linear svm classifier
+library(e1071)
+set.seed (6)
+tune.out=tune(svm ,cluster ~ ., data = train_set ,kernel ="radial", 
+              ranges =list(cost=c(0.001,0.01,0.1, 1,5,10,100)))
+bestmod =tune.out$best.model
+svm.confusion=table(true = test_set$cluster,pred = svm.pred)
+svm.accuracy = (892+2+17+139) / sum (svm.confusion)
+svm.accuracy
+
+
+
